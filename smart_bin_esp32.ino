@@ -7,14 +7,12 @@
  * POSTs a JSON message to a configurable URL. The JSON is also always
  * printed to the Serial Monitor at 115200 baud.
  *
- * JSON payload:
+ * JSON payload (each bin reported independently -- no combined average):
  * {
- *   "bin_id":     "BIN-001",
- *   "timestamp":  "2026-07-15T14:03:22Z",   // UTC, ISO-8601
- *   "fill_pct":   72.5,                       // averaged fill %
- *   "sensors": [                              // per-sensor/per-bin detail
- *     { "id": 1, "distance_cm": 11.2, "fill_pct": 71.0 },
- *     { "id": 2, "distance_cm": 10.4, "fill_pct": 74.0 }
+ *   "timestamp": "2026-07-15T14:03:22+01:00",   // WAT (UTC+1), ISO-8601
+ *   "bins": [
+ *     { "bin_id": "BIN-001", "distance_mm": 112.0, "fill_pct": 71.0 },
+ *     { "bin_id": "BIN-002", "distance_mm": 104.0, "fill_pct": 74.0 }
  *   ]
  * }
  *
@@ -84,22 +82,23 @@ const int STATUS_LED_PIN = 2;
 // fill% = (EMPTY - measured) / (EMPTY - FULL) * 100, clamped to 0..100.
 // Each bin can have a different size/sensor mounting height, so these
 // are tracked separately per sensor rather than shared.
-float SENSOR1_EMPTY_DISTANCE_CM = 40.0;   // bin 1: e.g. lid-mounted sensor 40 cm above floor
-float SENSOR1_FULL_DISTANCE_CM  = 5.0;    // bin 1: "full" when trash is 5 cm below the sensor
-float SENSOR2_EMPTY_DISTANCE_CM = 40.0;   // bin 2: calibrate for its own geometry
-float SENSOR2_FULL_DISTANCE_CM  = 5.0;    // bin 2: calibrate for its own geometry
+float SENSOR1_EMPTY_DISTANCE_MM = 154.0;  // bin 1: measured empty reading
+float SENSOR1_FULL_DISTANCE_MM  = 20.0;   // bin 1: measured full reading
+float SENSOR2_EMPTY_DISTANCE_MM = 108.0;  // bin 2: measured empty reading
+float SENSOR2_FULL_DISTANCE_MM  = 20.0;   // bin 2: measured full reading
 
 // ---- Device identity / server ---------------------------------------
 // Defaults; can also be changed later from the config portal without
-// re-flashing.
-String binId     = "BIN-001";
+// re-flashing. Each bin gets its own ID since they're reported separately.
+String bin1Id    = "BIN-001";
+String bin2Id    = "BIN-002";
 String serverUrl = "";   // e.g. https://example.com/api/bins/report
 
 // ==================================================================
 // ==================  ADVANCED SETTINGS  ==========================
 // ==================================================================
 // Rarely need to change these.
-const unsigned long REPORT_INTERVAL_MS = 60UL * 1000UL;   // send every 60 s
+const unsigned long REPORT_INTERVAL_MS = 5UL * 1000UL;    // send every 5 s
 const unsigned long SENSOR_TIMEOUT_US  = 30000UL;         // ~5 m max echo wait
 const int           SAMPLES_PER_READ   = 5;               // median-ish averaging
 
@@ -140,11 +139,12 @@ void setup() {
   // Bring up WiFi (captive portal on first boot / when creds missing)
   setupWiFi();
 
-  // Time sync for timestamps
-  configTime(0, 0, NTP_SERVER1, NTP_SERVER2);   // 0,0 = UTC, no DST offset
+  // Time sync for timestamps (WAT = UTC+1, no DST)
+  configTime(3600, 0, NTP_SERVER1, NTP_SERVER2);
   waitForTime();
 
-  Serial.printf("Bin ID    : %s\n", binId.c_str());
+  Serial.printf("Bin 1 ID  : %s\n", bin1Id.c_str());
+  Serial.printf("Bin 2 ID  : %s\n", bin2Id.c_str());
   Serial.printf("Server URL: %s\n", serverUrl.c_str());
   Serial.println("Setup complete.\n");
 }
@@ -176,23 +176,25 @@ void loop() {
 // ==================================================================
 void loadSettings() {
   prefs.begin("smartbin", true);   // read-only
-  binId     = prefs.getString("bin_id", binId);
+  bin1Id    = prefs.getString("bin1_id", bin1Id);
+  bin2Id    = prefs.getString("bin2_id", bin2Id);
   serverUrl = prefs.getString("server_url", serverUrl);
-  SENSOR1_EMPTY_DISTANCE_CM = prefs.getFloat("s1_empty_cm", SENSOR1_EMPTY_DISTANCE_CM);
-  SENSOR1_FULL_DISTANCE_CM  = prefs.getFloat("s1_full_cm",  SENSOR1_FULL_DISTANCE_CM);
-  SENSOR2_EMPTY_DISTANCE_CM = prefs.getFloat("s2_empty_cm", SENSOR2_EMPTY_DISTANCE_CM);
-  SENSOR2_FULL_DISTANCE_CM  = prefs.getFloat("s2_full_cm",  SENSOR2_FULL_DISTANCE_CM);
+  SENSOR1_EMPTY_DISTANCE_MM = prefs.getFloat("s1_empty_mm", SENSOR1_EMPTY_DISTANCE_MM);
+  SENSOR1_FULL_DISTANCE_MM  = prefs.getFloat("s1_full_mm",  SENSOR1_FULL_DISTANCE_MM);
+  SENSOR2_EMPTY_DISTANCE_MM = prefs.getFloat("s2_empty_mm", SENSOR2_EMPTY_DISTANCE_MM);
+  SENSOR2_FULL_DISTANCE_MM  = prefs.getFloat("s2_full_mm",  SENSOR2_FULL_DISTANCE_MM);
   prefs.end();
 }
 
 void saveSettings() {
   prefs.begin("smartbin", false);  // read-write
-  prefs.putString("bin_id", binId);
+  prefs.putString("bin1_id", bin1Id);
+  prefs.putString("bin2_id", bin2Id);
   prefs.putString("server_url", serverUrl);
-  prefs.putFloat("s1_empty_cm", SENSOR1_EMPTY_DISTANCE_CM);
-  prefs.putFloat("s1_full_cm",  SENSOR1_FULL_DISTANCE_CM);
-  prefs.putFloat("s2_empty_cm", SENSOR2_EMPTY_DISTANCE_CM);
-  prefs.putFloat("s2_full_cm",  SENSOR2_FULL_DISTANCE_CM);
+  prefs.putFloat("s1_empty_mm", SENSOR1_EMPTY_DISTANCE_MM);
+  prefs.putFloat("s1_full_mm",  SENSOR1_FULL_DISTANCE_MM);
+  prefs.putFloat("s2_empty_mm", SENSOR2_EMPTY_DISTANCE_MM);
+  prefs.putFloat("s2_full_mm",  SENSOR2_FULL_DISTANCE_MM);
   prefs.end();
   Serial.println("Settings saved to NVS.");
 }
@@ -213,30 +215,41 @@ void setupWiFi() {
       Serial.print(".");
     }
     Serial.println();
-  }
 
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("WiFi connected. IP: ");
-    Serial.println(WiFi.localIP());
-    if (STATUS_LED_PIN >= 0) digitalWrite(STATUS_LED_PIN, HIGH);
-    return;
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.print("WiFi connected. IP: ");
+      Serial.println(WiFi.localIP());
+      if (STATUS_LED_PIN >= 0) digitalWrite(STATUS_LED_PIN, HIGH);
+      return;
+    }
+
+    // Hardcoded attempt failed (wrong password / AP out of range / etc).
+    // Abort the pending connection cleanly before handing off to
+    // WiFiManager below -- otherwise its own connection attempt collides
+    // with this still-in-progress one ("sta is connecting, cannot set
+    // config") and AutoConnect fails immediately.
+    Serial.println("Hardcoded WiFi failed; falling back to config portal.");
+    WiFi.disconnect(true, true);
+    delay(500);
   }
 
   WiFiManager wm;
 
   // Custom fields shown in the captive portal, pre-filled with saved values
-  WiFiManagerParameter pBinId("bin_id", "Bin ID", binId.c_str(), 40);
+  WiFiManagerParameter pBin1Id("bin1_id", "Bin 1 ID", bin1Id.c_str(), 40);
+  WiFiManagerParameter pBin2Id("bin2_id", "Bin 2 ID", bin2Id.c_str(), 40);
   WiFiManagerParameter pUrl("server_url", "Server URL (https://...)", serverUrl.c_str(), 200);
-  char empty1Buf[16]; dtostrf(SENSOR1_EMPTY_DISTANCE_CM, 0, 1, empty1Buf);
-  char full1Buf[16];  dtostrf(SENSOR1_FULL_DISTANCE_CM,  0, 1, full1Buf);
-  char empty2Buf[16]; dtostrf(SENSOR2_EMPTY_DISTANCE_CM, 0, 1, empty2Buf);
-  char full2Buf[16];  dtostrf(SENSOR2_FULL_DISTANCE_CM,  0, 1, full2Buf);
-  WiFiManagerParameter pEmpty1("s1_empty_cm", "Bin 1 empty distance (cm)", empty1Buf, 8);
-  WiFiManagerParameter pFull1("s1_full_cm",  "Bin 1 full distance (cm)",  full1Buf, 8);
-  WiFiManagerParameter pEmpty2("s2_empty_cm", "Bin 2 empty distance (cm)", empty2Buf, 8);
-  WiFiManagerParameter pFull2("s2_full_cm",  "Bin 2 full distance (cm)",  full2Buf, 8);
+  char empty1Buf[16]; dtostrf(SENSOR1_EMPTY_DISTANCE_MM, 0, 1, empty1Buf);
+  char full1Buf[16];  dtostrf(SENSOR1_FULL_DISTANCE_MM,  0, 1, full1Buf);
+  char empty2Buf[16]; dtostrf(SENSOR2_EMPTY_DISTANCE_MM, 0, 1, empty2Buf);
+  char full2Buf[16];  dtostrf(SENSOR2_FULL_DISTANCE_MM,  0, 1, full2Buf);
+  WiFiManagerParameter pEmpty1("s1_empty_mm", "Bin 1 empty distance (mm)", empty1Buf, 8);
+  WiFiManagerParameter pFull1("s1_full_mm",  "Bin 1 full distance (mm)",  full1Buf, 8);
+  WiFiManagerParameter pEmpty2("s2_empty_mm", "Bin 2 empty distance (mm)", empty2Buf, 8);
+  WiFiManagerParameter pFull2("s2_full_mm",  "Bin 2 full distance (mm)",  full2Buf, 8);
 
-  wm.addParameter(&pBinId);
+  wm.addParameter(&pBin1Id);
+  wm.addParameter(&pBin2Id);
   wm.addParameter(&pUrl);
   wm.addParameter(&pEmpty1);
   wm.addParameter(&pFull1);
@@ -250,7 +263,7 @@ void setupWiFi() {
 
   if (wm.getWiFiIsSaved()) {
     // Portal ran and user may have edited the custom fields -> persist them
-    applyPortalParams(pBinId, pUrl, pEmpty1, pFull1, pEmpty2, pFull2);
+    applyPortalParams(pBin1Id, pBin2Id, pUrl, pEmpty1, pFull1, pEmpty2, pFull2);
   }
 
   if (!connected) {
@@ -268,18 +281,20 @@ void setupWiFi() {
 void openConfigPortal() {
   WiFiManager wm;
 
-  WiFiManagerParameter pBinId("bin_id", "Bin ID", binId.c_str(), 40);
+  WiFiManagerParameter pBin1Id("bin1_id", "Bin 1 ID", bin1Id.c_str(), 40);
+  WiFiManagerParameter pBin2Id("bin2_id", "Bin 2 ID", bin2Id.c_str(), 40);
   WiFiManagerParameter pUrl("server_url", "Server URL (https://...)", serverUrl.c_str(), 200);
-  char empty1Buf[16]; dtostrf(SENSOR1_EMPTY_DISTANCE_CM, 0, 1, empty1Buf);
-  char full1Buf[16];  dtostrf(SENSOR1_FULL_DISTANCE_CM,  0, 1, full1Buf);
-  char empty2Buf[16]; dtostrf(SENSOR2_EMPTY_DISTANCE_CM, 0, 1, empty2Buf);
-  char full2Buf[16];  dtostrf(SENSOR2_FULL_DISTANCE_CM,  0, 1, full2Buf);
-  WiFiManagerParameter pEmpty1("s1_empty_cm", "Bin 1 empty distance (cm)", empty1Buf, 8);
-  WiFiManagerParameter pFull1("s1_full_cm",  "Bin 1 full distance (cm)",  full1Buf, 8);
-  WiFiManagerParameter pEmpty2("s2_empty_cm", "Bin 2 empty distance (cm)", empty2Buf, 8);
-  WiFiManagerParameter pFull2("s2_full_cm",  "Bin 2 full distance (cm)",  full2Buf, 8);
+  char empty1Buf[16]; dtostrf(SENSOR1_EMPTY_DISTANCE_MM, 0, 1, empty1Buf);
+  char full1Buf[16];  dtostrf(SENSOR1_FULL_DISTANCE_MM,  0, 1, full1Buf);
+  char empty2Buf[16]; dtostrf(SENSOR2_EMPTY_DISTANCE_MM, 0, 1, empty2Buf);
+  char full2Buf[16];  dtostrf(SENSOR2_FULL_DISTANCE_MM,  0, 1, full2Buf);
+  WiFiManagerParameter pEmpty1("s1_empty_mm", "Bin 1 empty distance (mm)", empty1Buf, 8);
+  WiFiManagerParameter pFull1("s1_full_mm",  "Bin 1 full distance (mm)",  full1Buf, 8);
+  WiFiManagerParameter pEmpty2("s2_empty_mm", "Bin 2 empty distance (mm)", empty2Buf, 8);
+  WiFiManagerParameter pFull2("s2_full_mm",  "Bin 2 full distance (mm)",  full2Buf, 8);
 
-  wm.addParameter(&pBinId);
+  wm.addParameter(&pBin1Id);
+  wm.addParameter(&pBin2Id);
   wm.addParameter(&pUrl);
   wm.addParameter(&pEmpty1);
   wm.addParameter(&pFull1);
@@ -288,25 +303,27 @@ void openConfigPortal() {
 
   wm.setConfigPortalTimeout(180);
   if (wm.startConfigPortal("SmartBin-Setup", "binsetup123")) {
-    applyPortalParams(pBinId, pUrl, pEmpty1, pFull1, pEmpty2, pFull2);
+    applyPortalParams(pBin1Id, pBin2Id, pUrl, pEmpty1, pFull1, pEmpty2, pFull2);
   }
   Serial.println("Portal closed; restarting...");
   delay(1000);
   ESP.restart();
 }
 
-void applyPortalParams(WiFiManagerParameter& pBinId,
+void applyPortalParams(WiFiManagerParameter& pBin1Id,
+                       WiFiManagerParameter& pBin2Id,
                        WiFiManagerParameter& pUrl,
                        WiFiManagerParameter& pEmpty1,
                        WiFiManagerParameter& pFull1,
                        WiFiManagerParameter& pEmpty2,
                        WiFiManagerParameter& pFull2) {
-  binId     = String(pBinId.getValue());
+  bin1Id    = String(pBin1Id.getValue());
+  bin2Id    = String(pBin2Id.getValue());
   serverUrl = String(pUrl.getValue());
-  SENSOR1_EMPTY_DISTANCE_CM = atof(pEmpty1.getValue());
-  SENSOR1_FULL_DISTANCE_CM  = atof(pFull1.getValue());
-  SENSOR2_EMPTY_DISTANCE_CM = atof(pEmpty2.getValue());
-  SENSOR2_FULL_DISTANCE_CM  = atof(pFull2.getValue());
+  SENSOR1_EMPTY_DISTANCE_MM = atof(pEmpty1.getValue());
+  SENSOR1_FULL_DISTANCE_MM  = atof(pFull1.getValue());
+  SENSOR2_EMPTY_DISTANCE_MM = atof(pEmpty2.getValue());
+  SENSOR2_FULL_DISTANCE_MM  = atof(pFull2.getValue());
   saveSettings();
 }
 
@@ -328,20 +345,23 @@ void waitForTime() {
   }
 }
 
+// getLocalTime() already returns WAT (UTC+1) since configTime() was set up
+// with a 3600s offset, so the ISO-8601 suffix must be "+01:00", not "Z"
+// ("Z" specifically means zero/UTC offset).
 String getIso8601Timestamp() {
   struct tm timeinfo;
   if (!getLocalTime(&timeinfo)) {
-    return "1970-01-01T00:00:00Z";
+    return "1970-01-01T00:00:00+01:00";
   }
-  char buf[25];
-  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
+  char buf[30];
+  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S+01:00", &timeinfo);
   return String(buf);
 }
 
 // ==================================================================
 // ULTRASONIC READING
 // ==================================================================
-// Returns distance in cm, or -1.0 on timeout / no echo.
+// Returns distance in mm, or -1.0 on timeout / no echo.
 float readUltrasonicOnce(int trigPin, int echoPin) {
   digitalWrite(trigPin, LOW);
   delayMicroseconds(3);
@@ -351,7 +371,7 @@ float readUltrasonicOnce(int trigPin, int echoPin) {
 
   unsigned long duration = pulseIn(echoPin, HIGH, SENSOR_TIMEOUT_US);
   if (duration == 0) return -1.0;          // timeout
-  return (duration * 0.0343f) / 2.0f;      // speed of sound ~343 m/s
+  return (duration * 0.343f) / 2.0f;       // speed of sound ~343 m/s
 }
 
 // Averages several valid samples for stability.
@@ -369,11 +389,11 @@ float readUltrasonic(int trigPin, int echoPin) {
 
 // Convert a measured distance to a 0..100 fill percentage, using the
 // empty/full calibration for that specific bin/sensor.
-float distanceToFillPct(float distanceCm, float emptyCm, float fullCm) {
-  if (distanceCm < 0) return -1.0;   // invalid
-  float span = emptyCm - fullCm;
+float distanceToFillPct(float distanceMm, float emptyMm, float fullMm) {
+  if (distanceMm < 0) return -1.0;   // invalid
+  float span = emptyMm - fullMm;
   if (span <= 0) return -1.0;        // misconfigured geometry
-  float pct = (emptyCm - distanceCm) / span * 100.0f;
+  float pct = (emptyMm - distanceMm) / span * 100.0f;
   if (pct < 0)   pct = 0;
   if (pct > 100) pct = 100;
   return pct;
@@ -386,8 +406,8 @@ void takeReadingAndReport() {
   float d1 = readUltrasonic(SENSOR1_TRIG_PIN, SENSOR1_ECHO_PIN);
   float d2 = readUltrasonic(SENSOR2_TRIG_PIN, SENSOR2_ECHO_PIN);
 
-  float f1 = distanceToFillPct(d1, SENSOR1_EMPTY_DISTANCE_CM, SENSOR1_FULL_DISTANCE_CM);
-  float f2 = distanceToFillPct(d2, SENSOR2_EMPTY_DISTANCE_CM, SENSOR2_FULL_DISTANCE_CM);
+  float f1 = distanceToFillPct(d1, SENSOR1_EMPTY_DISTANCE_MM, SENSOR1_FULL_DISTANCE_MM);
+  float f2 = distanceToFillPct(d2, SENSOR2_EMPTY_DISTANCE_MM, SENSOR2_FULL_DISTANCE_MM);
 
   // Average only the sensors that returned a valid reading
   float fillSum = 0; int fillCount = 0;
@@ -400,7 +420,7 @@ void takeReadingAndReport() {
   }
   float fillAvg = fillSum / fillCount;
 
-  Serial.printf("S1: %.1f cm (%.1f%%)  S2: %.1f cm (%.1f%%)  ->  avg %.1f%%\n",
+  Serial.printf("S1: %.1f mm (%.1f%%)  S2: %.1f mm (%.1f%%)  ->  avg %.1f%%\n",
                 d1, f1, d2, f2, fillAvg);
 
   String payload = buildJson(fillAvg, d1, f1, d2, f2);
@@ -420,12 +440,12 @@ String buildJson(float fillAvg, float d1, float f1, float d2, float f2) {
   JsonArray sensors = doc.createNestedArray("sensors");
   JsonObject s1 = sensors.createNestedObject();
   s1["id"] = 1;
-  if (d1 >= 0) { s1["distance_cm"] = roundf(d1 * 10) / 10.0; s1["fill_pct"] = roundf(f1 * 10) / 10.0; }
-  else         { s1["distance_cm"] = nullptr;                s1["fill_pct"] = nullptr; }
+  if (d1 >= 0) { s1["distance_mm"] = roundf(d1 * 10) / 10.0; s1["fill_pct"] = roundf(f1 * 10) / 10.0; }
+  else         { s1["distance_mm"] = nullptr;                s1["fill_pct"] = nullptr; }
   JsonObject s2 = sensors.createNestedObject();
   s2["id"] = 2;
-  if (d2 >= 0) { s2["distance_cm"] = roundf(d2 * 10) / 10.0; s2["fill_pct"] = roundf(f2 * 10) / 10.0; }
-  else         { s2["distance_cm"] = nullptr;                s2["fill_pct"] = nullptr; }
+  if (d2 >= 0) { s2["distance_mm"] = roundf(d2 * 10) / 10.0; s2["fill_pct"] = roundf(f2 * 10) / 10.0; }
+  else         { s2["distance_mm"] = nullptr;                s2["fill_pct"] = nullptr; }
 
   String out;
   serializeJson(doc, out);

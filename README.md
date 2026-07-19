@@ -16,8 +16,8 @@ Every reporting cycle (default: 60 s) the ESP32 POSTs a JSON body like this:
   "timestamp": "2026-07-15T14:03:22Z",
   "fill_pct": 72.5,
   "sensors": [
-    { "id": 1, "distance_cm": 11.2, "fill_pct": 71.0 },
-    { "id": 2, "distance_cm": 10.4, "fill_pct": 74.0 }
+    { "id": 1, "distance_mm": 112.0, "fill_pct": 71.0 },
+    { "id": 2, "distance_mm": 104.0, "fill_pct": 74.0 }
   ]
 }
 ```
@@ -31,7 +31,7 @@ Every reporting cycle (default: 60 s) the ESP32 POSTs a JSON body like this:
 
 > The three fields you asked for are `bin_id`, `timestamp`, and `fill_pct`.
 > The `sensors` array is extra detail you can ignore server-side if you don't need it.
-> A sensor that failed to read reports `distance_cm: null` / `fill_pct: null` and is
+> A sensor that failed to read reports `distance_mm: null` / `fill_pct: null` and is
 > left out of the average.
 
 The same JSON is also always printed to the **Serial Monitor at 115200 baud**
@@ -142,9 +142,9 @@ blank) the ESP32 starts its own WiFi access point:
    - **Bin ID** — e.g. `BIN-001`
    - **Server URL** — the endpoint to POST to, e.g.
      `https://your-server.com/api/bins/report`
-   - **Bin 1 empty distance (cm)** / **Bin 1 full distance (cm)** — calibration
+   - **Bin 1 empty distance (mm)** / **Bin 1 full distance (mm)** — calibration
      for sensor 1 (see below)
-   - **Bin 2 empty distance (cm)** / **Bin 2 full distance (cm)** — calibration
+   - **Bin 2 empty distance (mm)** / **Bin 2 full distance (mm)** — calibration
      for sensor 2, set independently since bin 2 can be a different size/shape
 4. **Save.** The ESP32 stores everything and reboots onto your network.
 
@@ -177,7 +177,7 @@ fill% = (EMPTY_distance - measured_distance) / (EMPTY_distance - FULL_distance) 
 
 clamped to 0–100. **Each sensor/bin has its own Empty/Full pair** — bin 1 and bin 2
 don't have to be the same size or have the sensor mounted at the same height. So
-you need two numbers per bin, in centimetres:
+you need two numbers per bin, in millimetres:
 
 - **Empty distance** — what the sensor reads when its bin is **empty**
   (roughly the distance from the sensor down to the bin floor).
@@ -185,10 +185,10 @@ you need two numbers per bin, in centimetres:
   (how close the trash gets to the sensor before you consider it 100%).
 
 **How to measure:** for each bin, empty it, open the Serial Monitor (115200 baud)
-and note the reported `cm` for that sensor — that's its *Empty distance*. Then hold
-something at the "full" level over that same bin and note that `cm` — that's its
-*Full distance*. Enter both pairs in the portal (or edit `SENSOR1_EMPTY_DISTANCE_CM`
-/ `SENSOR1_FULL_DISTANCE_CM` / `SENSOR2_EMPTY_DISTANCE_CM` / `SENSOR2_FULL_DISTANCE_CM`
+and note the reported `mm` for that sensor — that's its *Empty distance*. Then hold
+something at the "full" level over that same bin and note that `mm` — that's its
+*Full distance*. Enter both pairs in the portal (or edit `SENSOR1_EMPTY_DISTANCE_MM`
+/ `SENSOR1_FULL_DISTANCE_MM` / `SENSOR2_EMPTY_DISTANCE_MM` / `SENSOR2_FULL_DISTANCE_MM`
 in the code).
 
 ---
@@ -229,13 +229,13 @@ Constants near the top of `smart_bin_esp32.ino`:
 
 | Constant                     | Default   | Purpose                                  |
 |------------------------------|-----------|------------------------------------------|
-| `REPORT_INTERVAL_MS`         | 60 000    | How often to send a report (ms).         |
+| `REPORT_INTERVAL_MS`         | 5 000     | How often to send a report (ms).         |
 | `SAMPLES_PER_READ`           | 5         | Samples averaged per sensor reading.     |
 | `SENSOR_TIMEOUT_US`          | 30 000    | Max echo wait before a reading is "fail".|
-| `SENSOR1_EMPTY_DISTANCE_CM`  | 40.0      | Bin 1 distance when empty (also in portal).|
-| `SENSOR1_FULL_DISTANCE_CM`   | 5.0       | Bin 1 distance when full (also in portal). |
-| `SENSOR2_EMPTY_DISTANCE_CM`  | 40.0      | Bin 2 distance when empty (also in portal).|
-| `SENSOR2_FULL_DISTANCE_CM`   | 5.0       | Bin 2 distance when full (also in portal). |
+| `SENSOR1_EMPTY_DISTANCE_MM`  | 400.0     | Bin 1 distance when empty (also in portal).|
+| `SENSOR1_FULL_DISTANCE_MM`   | 50.0      | Bin 1 distance when full (also in portal). |
+| `SENSOR2_EMPTY_DISTANCE_MM`  | 400.0     | Bin 2 distance when empty (also in portal).|
+| `SENSOR2_FULL_DISTANCE_MM`   | 50.0      | Bin 2 distance when full (also in portal). |
 
 ---
 
