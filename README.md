@@ -1,4 +1,4 @@
-# Smart Bin (ESP32)
+ # Smart Bin (ESP32)
 
 A prototype smart waste bin. An ESP32 reads two ultrasonic sensors, works out how
 full the bin is, and posts a JSON message to a web endpoint over HTTPS at a fixed

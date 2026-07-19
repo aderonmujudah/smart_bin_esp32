@@ -1,23 +1,34 @@
 /*
  * Smart Bin - ESP32
  * -----------------
- * Reads two HC-SR04 ultrasonic sensors, converts the distance to a
- * fill percentage, and POSTs a JSON message to a configurable URL.
+ * Reads two HC-SR04 ultrasonic sensors, converts each distance to a
+ * fill percentage (each sensor has its own empty/full calibration,
+ * since they can be mounted on bins of different sizes/shapes), and
+ * POSTs a JSON message to a configurable URL. The JSON is also always
+ * printed to the Serial Monitor at 115200 baud.
  *
  * JSON payload:
  * {
  *   "bin_id":     "BIN-001",
  *   "timestamp":  "2026-07-15T14:03:22Z",   // UTC, ISO-8601
  *   "fill_pct":   72.5,                       // averaged fill %
- *   "sensors": [                              // optional detail
+ *   "sensors": [                              // per-sensor/per-bin detail
  *     { "id": 1, "distance_cm": 11.2, "fill_pct": 71.0 },
  *     { "id": 2, "distance_cm": 10.4, "fill_pct": 74.0 }
  *   ]
  * }
  *
- * WiFi + device settings are entered through a captive portal
- * (WiFiManager) on first boot and stored in NVS flash, so they
- * survive normal firmware re-flashes.
+ * WiFi credentials are entered by the user through a captive portal
+ * (WiFiManager) on first boot: the ESP32 opens a WiFi access point
+ * named "SmartBin-Setup", the user connects to it with a phone/laptop
+ * and picks their home/office WiFi network + password from a web page.
+ * Those credentials are stored by the ESP32 core's own WiFi driver in
+ * NVS (Non-Volatile Storage), a dedicated flash partition that is NOT
+ * touched by a normal "Upload" of new firmware (only "Erase Flash" or
+ * changing the partition table wipes it), so WiFi survives re-flashing.
+ * Device settings (bin ID, server URL, calibration distances) are
+ * likewise saved to NVS via the Preferences library (see loadSettings()
+ * / saveSettings() below).
  *
  * Libraries required (install via Arduino Library Manager):
  *   - WiFiManager           by tzapu
@@ -53,13 +64,17 @@ const int CONFIG_BUTTON_PIN = 0;   // GPIO0 = the onboard BOOT button
 const int STATUS_LED_PIN = 2;
 
 // ------------------------------------------------------------------
-// BIN GEOMETRY  (calibrate these for your physical bin)
+// BIN GEOMETRY  (calibrate independently per bin/sensor)
 // ------------------------------------------------------------------
-// Distance the sensor reads when the bin is EMPTY  (sensor -> bottom).
-// Distance the sensor reads when the bin is FULL   (sensor -> top of trash).
+// Distance the sensor reads when its bin is EMPTY  (sensor -> bottom).
+// Distance the sensor reads when its bin is FULL   (sensor -> top of trash).
 // fill% = (EMPTY - measured) / (EMPTY - FULL) * 100, clamped to 0..100.
-float BIN_EMPTY_DISTANCE_CM = 40.0;   // e.g. lid-mounted sensor 40 cm above floor
-float BIN_FULL_DISTANCE_CM  = 5.0;    // "full" when trash is 5 cm below the sensor
+// Each bin can have a different size/sensor mounting height, so these
+// are tracked separately per sensor rather than shared.
+float SENSOR1_EMPTY_DISTANCE_CM = 40.0;   // bin 1: e.g. lid-mounted sensor 40 cm above floor
+float SENSOR1_FULL_DISTANCE_CM  = 5.0;    // bin 1: "full" when trash is 5 cm below the sensor
+float SENSOR2_EMPTY_DISTANCE_CM = 40.0;   // bin 2: calibrate for its own geometry
+float SENSOR2_FULL_DISTANCE_CM  = 5.0;    // bin 2: calibrate for its own geometry
 
 // ------------------------------------------------------------------
 // TIMING
@@ -147,8 +162,10 @@ void loadSettings() {
   prefs.begin("smartbin", true);   // read-only
   binId     = prefs.getString("bin_id", binId);
   serverUrl = prefs.getString("server_url", serverUrl);
-  BIN_EMPTY_DISTANCE_CM = prefs.getFloat("empty_cm", BIN_EMPTY_DISTANCE_CM);
-  BIN_FULL_DISTANCE_CM  = prefs.getFloat("full_cm",  BIN_FULL_DISTANCE_CM);
+  SENSOR1_EMPTY_DISTANCE_CM = prefs.getFloat("s1_empty_cm", SENSOR1_EMPTY_DISTANCE_CM);
+  SENSOR1_FULL_DISTANCE_CM  = prefs.getFloat("s1_full_cm",  SENSOR1_FULL_DISTANCE_CM);
+  SENSOR2_EMPTY_DISTANCE_CM = prefs.getFloat("s2_empty_cm", SENSOR2_EMPTY_DISTANCE_CM);
+  SENSOR2_FULL_DISTANCE_CM  = prefs.getFloat("s2_full_cm",  SENSOR2_FULL_DISTANCE_CM);
   prefs.end();
 }
 
@@ -156,8 +173,10 @@ void saveSettings() {
   prefs.begin("smartbin", false);  // read-write
   prefs.putString("bin_id", binId);
   prefs.putString("server_url", serverUrl);
-  prefs.putFloat("empty_cm", BIN_EMPTY_DISTANCE_CM);
-  prefs.putFloat("full_cm",  BIN_FULL_DISTANCE_CM);
+  prefs.putFloat("s1_empty_cm", SENSOR1_EMPTY_DISTANCE_CM);
+  prefs.putFloat("s1_full_cm",  SENSOR1_FULL_DISTANCE_CM);
+  prefs.putFloat("s2_empty_cm", SENSOR2_EMPTY_DISTANCE_CM);
+  prefs.putFloat("s2_full_cm",  SENSOR2_FULL_DISTANCE_CM);
   prefs.end();
   Serial.println("Settings saved to NVS.");
 }
@@ -171,15 +190,21 @@ void setupWiFi() {
   // Custom fields shown in the captive portal, pre-filled with saved values
   WiFiManagerParameter pBinId("bin_id", "Bin ID", binId.c_str(), 40);
   WiFiManagerParameter pUrl("server_url", "Server URL (https://...)", serverUrl.c_str(), 200);
-  char emptyBuf[16]; dtostrf(BIN_EMPTY_DISTANCE_CM, 0, 1, emptyBuf);
-  char fullBuf[16];  dtostrf(BIN_FULL_DISTANCE_CM,  0, 1, fullBuf);
-  WiFiManagerParameter pEmpty("empty_cm", "Empty distance (cm)", emptyBuf, 8);
-  WiFiManagerParameter pFull("full_cm",  "Full distance (cm)",  fullBuf, 8);
+  char empty1Buf[16]; dtostrf(SENSOR1_EMPTY_DISTANCE_CM, 0, 1, empty1Buf);
+  char full1Buf[16];  dtostrf(SENSOR1_FULL_DISTANCE_CM,  0, 1, full1Buf);
+  char empty2Buf[16]; dtostrf(SENSOR2_EMPTY_DISTANCE_CM, 0, 1, empty2Buf);
+  char full2Buf[16];  dtostrf(SENSOR2_FULL_DISTANCE_CM,  0, 1, full2Buf);
+  WiFiManagerParameter pEmpty1("s1_empty_cm", "Bin 1 empty distance (cm)", empty1Buf, 8);
+  WiFiManagerParameter pFull1("s1_full_cm",  "Bin 1 full distance (cm)",  full1Buf, 8);
+  WiFiManagerParameter pEmpty2("s2_empty_cm", "Bin 2 empty distance (cm)", empty2Buf, 8);
+  WiFiManagerParameter pFull2("s2_full_cm",  "Bin 2 full distance (cm)",  full2Buf, 8);
 
   wm.addParameter(&pBinId);
   wm.addParameter(&pUrl);
-  wm.addParameter(&pEmpty);
-  wm.addParameter(&pFull);
+  wm.addParameter(&pEmpty1);
+  wm.addParameter(&pFull1);
+  wm.addParameter(&pEmpty2);
+  wm.addParameter(&pFull2);
 
   wm.setConfigPortalTimeout(180);   // seconds before giving up and retrying
 
@@ -188,7 +213,7 @@ void setupWiFi() {
 
   if (wm.getWiFiIsSaved()) {
     // Portal ran and user may have edited the custom fields -> persist them
-    applyPortalParams(pBinId, pUrl, pEmpty, pFull);
+    applyPortalParams(pBinId, pUrl, pEmpty1, pFull1, pEmpty2, pFull2);
   }
 
   if (!connected) {
@@ -208,19 +233,25 @@ void openConfigPortal() {
 
   WiFiManagerParameter pBinId("bin_id", "Bin ID", binId.c_str(), 40);
   WiFiManagerParameter pUrl("server_url", "Server URL (https://...)", serverUrl.c_str(), 200);
-  char emptyBuf[16]; dtostrf(BIN_EMPTY_DISTANCE_CM, 0, 1, emptyBuf);
-  char fullBuf[16];  dtostrf(BIN_FULL_DISTANCE_CM,  0, 1, fullBuf);
-  WiFiManagerParameter pEmpty("empty_cm", "Empty distance (cm)", emptyBuf, 8);
-  WiFiManagerParameter pFull("full_cm",  "Full distance (cm)",  fullBuf, 8);
+  char empty1Buf[16]; dtostrf(SENSOR1_EMPTY_DISTANCE_CM, 0, 1, empty1Buf);
+  char full1Buf[16];  dtostrf(SENSOR1_FULL_DISTANCE_CM,  0, 1, full1Buf);
+  char empty2Buf[16]; dtostrf(SENSOR2_EMPTY_DISTANCE_CM, 0, 1, empty2Buf);
+  char full2Buf[16];  dtostrf(SENSOR2_FULL_DISTANCE_CM,  0, 1, full2Buf);
+  WiFiManagerParameter pEmpty1("s1_empty_cm", "Bin 1 empty distance (cm)", empty1Buf, 8);
+  WiFiManagerParameter pFull1("s1_full_cm",  "Bin 1 full distance (cm)",  full1Buf, 8);
+  WiFiManagerParameter pEmpty2("s2_empty_cm", "Bin 2 empty distance (cm)", empty2Buf, 8);
+  WiFiManagerParameter pFull2("s2_full_cm",  "Bin 2 full distance (cm)",  full2Buf, 8);
 
   wm.addParameter(&pBinId);
   wm.addParameter(&pUrl);
-  wm.addParameter(&pEmpty);
-  wm.addParameter(&pFull);
+  wm.addParameter(&pEmpty1);
+  wm.addParameter(&pFull1);
+  wm.addParameter(&pEmpty2);
+  wm.addParameter(&pFull2);
 
   wm.setConfigPortalTimeout(180);
   if (wm.startConfigPortal("SmartBin-Setup", "binsetup123")) {
-    applyPortalParams(pBinId, pUrl, pEmpty, pFull);
+    applyPortalParams(pBinId, pUrl, pEmpty1, pFull1, pEmpty2, pFull2);
   }
   Serial.println("Portal closed; restarting...");
   delay(1000);
