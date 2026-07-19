@@ -123,20 +123,26 @@ All the settings you're likely to need to change — WiFi, pin wiring, and
 per-bin calibration distances — are collected in one **"EDIT THIS SECTION"**
 block near the top of `smart_bin_esp32.ino`, right after the `#include`s.
 
+The bin can try **multiple WiFi networks** (home, office, phone hotspot, etc.)
+on every boot, connecting to whichever is in range.
+
 ### Option A: hardcode your WiFi in the code
-Set `WIFI_SSID` / `WIFI_PASSWORD` in that block to your network's credentials
-and re-upload. The bin will connect straight to that network on every boot —
-no portal needed. Leave both as `""` to use the captive portal instead (below).
+Fill in one or more slots of the `wifiNetworks[]` array in that block with
+SSID/password pairs and re-upload. The bin will loop through all of them on
+every boot — no portal needed. Leave a slot's SSID as `""` to skip it.
 
 ### Option B: captive portal (no re-flashing needed)
-On first boot (or whenever no WiFi is saved/reachable, and `WIFI_SSID` is left
-blank) the ESP32 starts its own WiFi access point:
+On first boot (or whenever none of the saved networks are reachable) the
+ESP32 starts its own WiFi access point:
 
 1. On your phone/laptop, connect to the WiFi network **`SmartBin-Setup`**
    (password **`binsetup123`**).
 2. A configuration page opens automatically (if not, browse to `http://192.168.4.1`).
 3. Tap **Configure WiFi** and you'll see:
-   - Your home/office WiFi network + password
+   - Your home/office WiFi network + password (adds/updates one of the saved
+     network slots)
+   - **WiFi 1–4 SSID / Password** — up to 4 more backup networks, set directly
+   - **Device ID** — e.g. `DEVICE-001` (shared by both bins — same ESP32)
    - **Bin 1 ID** — e.g. `BIN-001`
    - **Bin 2 ID** — e.g. `BIN-002`
    - **Server URL** — the endpoint to POST to, e.g.
@@ -145,14 +151,13 @@ blank) the ESP32 starts its own WiFi access point:
      for sensor 1 (see below)
    - **Bin 2 empty distance (mm)** / **Bin 2 full distance (mm)** — calibration
      for sensor 2, set independently since bin 2 can be a different size/shape
-4. **Save.** The ESP32 stores everything and reboots onto your network.
+4. **Save.** The ESP32 stores everything and reboots, trying all saved networks.
 
 ### Where settings are stored (survives re-flashing)
-- **WiFi credentials** — whether typed into the portal or hardcoded via
-  `WIFI_SSID`/`WIFI_PASSWORD` — are saved by the ESP32's WiFi driver in **NVS
-  flash**.
-- **Bin 1 ID, Bin 2 ID, Server URL, and calibration** are saved with the
-  `Preferences` library, also in **NVS**.
+- **WiFi networks** — whether typed into the portal or hardcoded via
+  `wifiNetworks[]` — are saved with the `Preferences` library in **NVS flash**.
+- **Device ID, Bin 1 ID, Bin 2 ID, Server URL, and calibration** are saved the
+  same way, also in **NVS**.
 
 NVS lives in a separate flash partition from your program, so **uploading new
 firmware does NOT erase your saved settings.** They are only wiped by a full chip

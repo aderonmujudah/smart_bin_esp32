@@ -7,26 +7,28 @@
  * POSTs a JSON message to a configurable URL. The JSON is also always
  * printed to the Serial Monitor at 115200 baud.
  *
- * JSON payload (each bin reported independently -- no combined average):
+ * Each bin is reported independently as its own POST request (both bins
+ * share one deviceId, since they're the same ESP32):
  * {
- *   "timestamp": "2026-07-15T14:03:22+01:00",   // WAT (UTC+1), ISO-8601
- *   "bins": [
- *     { "bin_id": "BIN-001", "distance_mm": 112.0, "fill_pct": 71.0 },
- *     { "bin_id": "BIN-002", "distance_mm": 104.0, "fill_pct": 74.0 }
- *   ]
+ *   "deviceId": "DEVICE-001",
+ *   "binId": "BIN-001",
+ *   "fillPercentage": 72,
+ *   "recordedAt": "2026-07-15T14:03:22.000Z"   // UTC, ISO-8601
  * }
  *
- * WiFi credentials are entered by the user through a captive portal
- * (WiFiManager) on first boot: the ESP32 opens a WiFi access point
- * named "SmartBin-Setup", the user connects to it with a phone/laptop
- * and picks their home/office WiFi network + password from a web page.
- * Those credentials are stored by the ESP32 core's own WiFi driver in
- * NVS (Non-Volatile Storage), a dedicated flash partition that is NOT
- * touched by a normal "Upload" of new firmware (only "Erase Flash" or
- * changing the partition table wipes it), so WiFi survives re-flashing.
- * Device settings (bin IDs, server URL, calibration distances) are
- * likewise saved to NVS via the Preferences library (see loadSettings()
- * / saveSettings() below).
+ * Multiple WiFi networks can be configured (home, office, phone hotspot,
+ * etc.) -- on every boot the ESP32 loops through all of them (via
+ * WiFiMulti) and connects to whichever is in range. Networks are entered
+ * either as hardcoded defaults in this file, or through a captive portal
+ * (WiFiManager): the ESP32 opens a WiFi access point named
+ * "SmartBin-Setup", the user connects to it with a phone/laptop and
+ * enters SSID/password for one or more networks from a web page. All
+ * configured networks, plus device settings (bin IDs, server URL,
+ * calibration distances), are saved to NVS (Non-Volatile Storage) via
+ * the Preferences library (see loadSettings() / saveSettings() below) --
+ * a dedicated flash partition that is NOT touched by a normal "Upload" of
+ * new firmware (only "Erase Flash" or changing the partition table wipes
+ * it), so everything survives re-flashing.
  *
  * Libraries required (install via Arduino Library Manager):
  *   - WiFiManager           by tzapu
@@ -35,6 +37,7 @@
  */
 
 #include <WiFi.h>
+#include <WiFiMulti.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <WiFiManager.h>        // https://github.com/tzapu/WiFiManager
@@ -49,15 +52,22 @@
 // pin wiring, and per-bin calibration distances.
 
 // ---- WiFi ---------------------------------------------------------
-// Fill these in with your home/office network to auto-connect on
-// every boot with no captive portal needed. Leave both as "" to skip
-// straight to the "SmartBin-Setup" portal instead (see README).
-// NOTE: whichever network gets used (hardcoded here, or entered later
-// in the portal) is saved by the ESP32's WiFi driver into NVS flash,
-// a partition normal firmware uploads do NOT erase, so it survives
-// re-flashing.
-const char* WIFI_SSID     = "";
-const char* WIFI_PASSWORD = "";
+// Fill in as many networks as you want tried on every boot (home,
+// office, phone hotspot, etc.) -- the ESP32 loops through all of them
+// and connects to whichever is in range. Leave a slot's SSID as "" to
+// skip it. More networks can be added later without re-flashing via the
+// "SmartBin-Setup" config portal (see README).
+// NOTE: all configured networks (hardcoded here, or added later via the
+// portal) are saved to NVS flash, a partition normal firmware uploads
+// do NOT erase, so they survive re-flashing.
+const int MAX_WIFI_NETWORKS = 4;
+struct WifiCredential { String ssid; String password; };
+WifiCredential wifiNetworks[MAX_WIFI_NETWORKS] = {
+  { "", "" },
+  { "", "" },
+  { "", "" },
+  { "", "" },
+};
 
 // ---- Pin wiring -----------------------------------------------------
 // Each HC-SR04 needs a TRIG (output) and ECHO (input) pin.
@@ -84,12 +94,14 @@ const int STATUS_LED_PIN = 2;
 // are tracked separately per sensor rather than shared.
 float SENSOR1_EMPTY_DISTANCE_MM = 154.0;  // bin 1: measured empty reading
 float SENSOR1_FULL_DISTANCE_MM  = 20.0;   // bin 1: measured full reading
-float SENSOR2_EMPTY_DISTANCE_MM = 108.0;  // bin 2: measured empty reading
+float SENSOR2_EMPTY_DISTANCE_MM = 258.0;  // bin 2: measured empty reading
 float SENSOR2_FULL_DISTANCE_MM  = 20.0;   // bin 2: measured full reading
 
 // ---- Device identity / server ---------------------------------------
 // Defaults; can also be changed later from the config portal without
-// re-flashing. Each bin gets its own ID since they're reported separately.
+// re-flashing. Both bins share one deviceId (same ESP32); each still gets
+// its own binId since they're reported independently.
+String deviceId  = "DEVICE-001";
 String bin1Id    = "BIN-001";
 String bin2Id    = "BIN-002";
 String serverUrl = "https://honorable-oyster-125.eu-west-1.convex.site/hardware/readings";   // e.g. https://example.com/api/bins/report
@@ -143,6 +155,7 @@ void setup() {
   configTime(3600, 0, NTP_SERVER1, NTP_SERVER2);
   waitForTime();
 
+  Serial.printf("Device ID : %s\n", deviceId.c_str());
   Serial.printf("Bin 1 ID  : %s\n", bin1Id.c_str());
   Serial.printf("Bin 2 ID  : %s\n", bin2Id.c_str());
   Serial.printf("Server URL: %s\n", serverUrl.c_str());
@@ -176,18 +189,31 @@ void loop() {
 // ==================================================================
 void loadSettings() {
   prefs.begin("smartbin", true);   // read-only
+  deviceId  = prefs.getString("device_id", deviceId);
   bin1Id    = prefs.getString("bin1_id", bin1Id);
   bin2Id    = prefs.getString("bin2_id", bin2Id);
-  serverUrl = prefs.getString("server_url", serverUrl);
+  // Only override the hardcoded default if a non-empty URL was actually
+  // saved before -- otherwise a previously-empty saved value would keep
+  // clobbering a new hardcoded default on every boot.
+  String savedUrl = prefs.getString("server_url", serverUrl);
+  if (savedUrl.length() > 0) serverUrl = savedUrl;
   SENSOR1_EMPTY_DISTANCE_MM = prefs.getFloat("s1_empty_mm", SENSOR1_EMPTY_DISTANCE_MM);
   SENSOR1_FULL_DISTANCE_MM  = prefs.getFloat("s1_full_mm",  SENSOR1_FULL_DISTANCE_MM);
   SENSOR2_EMPTY_DISTANCE_MM = prefs.getFloat("s2_empty_mm", SENSOR2_EMPTY_DISTANCE_MM);
   SENSOR2_FULL_DISTANCE_MM  = prefs.getFloat("s2_full_mm",  SENSOR2_FULL_DISTANCE_MM);
+  for (int i = 0; i < MAX_WIFI_NETWORKS; i++) {
+    char ssidKey[16], passKey[16];
+    snprintf(ssidKey, sizeof(ssidKey), "wifi%d_ssid", i);
+    snprintf(passKey, sizeof(passKey), "wifi%d_pass", i);
+    wifiNetworks[i].ssid     = prefs.getString(ssidKey, wifiNetworks[i].ssid);
+    wifiNetworks[i].password = prefs.getString(passKey, wifiNetworks[i].password);
+  }
   prefs.end();
 }
 
 void saveSettings() {
   prefs.begin("smartbin", false);  // read-write
+  prefs.putString("device_id", deviceId);
   prefs.putString("bin1_id", bin1Id);
   prefs.putString("bin2_id", bin2Id);
   prefs.putString("server_url", serverUrl);
@@ -195,47 +221,96 @@ void saveSettings() {
   prefs.putFloat("s1_full_mm",  SENSOR1_FULL_DISTANCE_MM);
   prefs.putFloat("s2_empty_mm", SENSOR2_EMPTY_DISTANCE_MM);
   prefs.putFloat("s2_full_mm",  SENSOR2_FULL_DISTANCE_MM);
+  for (int i = 0; i < MAX_WIFI_NETWORKS; i++) {
+    char ssidKey[16], passKey[16];
+    snprintf(ssidKey, sizeof(ssidKey), "wifi%d_ssid", i);
+    snprintf(passKey, sizeof(passKey), "wifi%d_pass", i);
+    prefs.putString(ssidKey, wifiNetworks[i].ssid);
+    prefs.putString(passKey, wifiNetworks[i].password);
+  }
   prefs.end();
   Serial.println("Settings saved to NVS.");
+}
+
+// Adds a newly-connected network to the try-list (matching by SSID updates
+// its password instead of adding a duplicate), so it's tried automatically
+// on future boots alongside the rest of wifiNetworks[].
+void rememberWifiNetwork(const String& ssid, const String& password) {
+  if (ssid.length() == 0) return;
+  int freeSlot = -1;
+  for (int i = 0; i < MAX_WIFI_NETWORKS; i++) {
+    if (wifiNetworks[i].ssid == ssid) {
+      wifiNetworks[i].password = password;
+      return;
+    }
+    if (freeSlot < 0 && wifiNetworks[i].ssid.length() == 0) freeSlot = i;
+  }
+  if (freeSlot >= 0) {
+    wifiNetworks[freeSlot].ssid     = ssid;
+    wifiNetworks[freeSlot].password = password;
+  } else {
+    Serial.println("WiFi network list full; not remembering new network (increase MAX_WIFI_NETWORKS).");
+  }
 }
 
 // ==================================================================
 // WIFI + CAPTIVE PORTAL
 // ==================================================================
 void setupWiFi() {
-  // If a WiFi network is hardcoded above, try it first so the bin can
-  // boot straight onto your network with no portal interaction at all.
-  if (strlen(WIFI_SSID) > 0) {
-    Serial.printf("Connecting to hardcoded WiFi \"%s\"", WIFI_SSID);
+  // Try every configured network first (hardcoded above, or added earlier
+  // via the portal) so the bin can boot straight onto whichever is in
+  // range with no portal interaction at all. WiFiMulti loops over all of
+  // them and connects to the strongest one it can reach.
+  WiFiMulti wifiMulti;
+  int configured = 0;
+  for (int i = 0; i < MAX_WIFI_NETWORKS; i++) {
+    if (wifiNetworks[i].ssid.length() > 0) {
+      wifiMulti.addAP(wifiNetworks[i].ssid.c_str(), wifiNetworks[i].password.c_str());
+      configured++;
+    }
+  }
+
+  if (configured > 0) {
+    Serial.printf("Trying %d saved WiFi network(s)", configured);
     WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000UL) {
-      delay(250);
+    while (wifiMulti.run() != WL_CONNECTED && millis() - start < 20000UL) {
       Serial.print(".");
     }
     Serial.println();
 
     if (WiFi.status() == WL_CONNECTED) {
-      Serial.print("WiFi connected. IP: ");
+      Serial.printf("WiFi connected to \"%s\". IP: ", WiFi.SSID().c_str());
       Serial.println(WiFi.localIP());
       if (STATUS_LED_PIN >= 0) digitalWrite(STATUS_LED_PIN, HIGH);
       return;
     }
 
-    // Hardcoded attempt failed (wrong password / AP out of range / etc).
-    // Abort the pending connection cleanly before handing off to
-    // WiFiManager below -- otherwise its own connection attempt collides
-    // with this still-in-progress one ("sta is connecting, cannot set
-    // config") and AutoConnect fails immediately.
-    Serial.println("Hardcoded WiFi failed; falling back to config portal.");
+    // None of the saved networks were reachable (out of range / all
+    // passwords stale / etc). Abort the pending connection cleanly before
+    // handing off to WiFiManager below -- otherwise its own connection
+    // attempt collides with this still-in-progress one ("sta is
+    // connecting, cannot set config") and AutoConnect fails immediately.
+    Serial.println("No saved WiFi networks reachable; falling back to config portal.");
     WiFi.disconnect(true, true);
     delay(500);
   }
 
+  runConfigPortal(/*forcePortal=*/false);
+}
+
+// On-demand portal (triggered by holding the config button)
+void openConfigPortal() {
+  runConfigPortal(/*forcePortal=*/true);
+}
+
+// Shared by setupWiFi() (auto-connect, falls back to portal) and
+// openConfigPortal() (always opens the portal). Restarts the ESP32 when done
+// either way, since WiFi/settings state is cleanest resolved by a fresh boot.
+void runConfigPortal(bool forcePortal) {
   WiFiManager wm;
 
-  // Custom fields shown in the captive portal, pre-filled with saved values
+  WiFiManagerParameter pDeviceId("device_id", "Device ID", deviceId.c_str(), 40);
   WiFiManagerParameter pBin1Id("bin1_id", "Bin 1 ID", bin1Id.c_str(), 40);
   WiFiManagerParameter pBin2Id("bin2_id", "Bin 2 ID", bin2Id.c_str(), 40);
   WiFiManagerParameter pUrl("server_url", "Server URL (https://...)", serverUrl.c_str(), 200);
@@ -248,6 +323,7 @@ void setupWiFi() {
   WiFiManagerParameter pEmpty2("s2_empty_mm", "Bin 2 empty distance (mm)", empty2Buf, 8);
   WiFiManagerParameter pFull2("s2_full_mm",  "Bin 2 full distance (mm)",  full2Buf, 8);
 
+  wm.addParameter(&pDeviceId);
   wm.addParameter(&pBin1Id);
   wm.addParameter(&pBin2Id);
   wm.addParameter(&pUrl);
@@ -256,14 +332,59 @@ void setupWiFi() {
   wm.addParameter(&pEmpty2);
   wm.addParameter(&pFull2);
 
+  // Extra "WiFi N SSID/Password" fields so more backup networks can be
+  // added straight from the portal, without re-flashing. Allocated on the
+  // heap since WiFiManagerParameter keeps referencing these until the
+  // portal closes, well past this loop's scope.
+  WiFiManagerParameter* ssidParams[MAX_WIFI_NETWORKS];
+  WiFiManagerParameter* passParams[MAX_WIFI_NETWORKS];
+  for (int i = 0; i < MAX_WIFI_NETWORKS; i++) {
+    char ssidLabel[24], passLabel[24], ssidId[16], passId[16];
+    snprintf(ssidLabel, sizeof(ssidLabel), "WiFi %d SSID", i + 1);
+    snprintf(passLabel, sizeof(passLabel), "WiFi %d Password", i + 1);
+    snprintf(ssidId, sizeof(ssidId), "wifi%d_ssid", i);
+    snprintf(passId, sizeof(passId), "wifi%d_pass", i);
+    ssidParams[i] = new WiFiManagerParameter(ssidId, ssidLabel, wifiNetworks[i].ssid.c_str(), 40);
+    passParams[i] = new WiFiManagerParameter(passId, passLabel, wifiNetworks[i].password.c_str(), 64);
+    wm.addParameter(ssidParams[i]);
+    wm.addParameter(passParams[i]);
+  }
+
   wm.setConfigPortalTimeout(180);   // seconds before giving up and retrying
 
-  // Tries saved creds first; if none/failed, opens AP "SmartBin-Setup"
-  bool connected = wm.autoConnect("SmartBin-Setup", "binsetup123");
+  bool connected = forcePortal
+      ? wm.startConfigPortal("SmartBin-Setup", "binsetup123")
+      : wm.autoConnect("SmartBin-Setup", "binsetup123");
 
-  if (wm.getWiFiIsSaved()) {
-    // Portal ran and user may have edited the custom fields -> persist them
-    applyPortalParams(pBin1Id, pBin2Id, pUrl, pEmpty1, pFull1, pEmpty2, pFull2);
+  // Portal ran and user may have edited the custom fields, or connected to
+  // a new network through WiFiManager's own "Configure WiFi" flow -> persist
+  // everything, including that new network, into wifiNetworks[].
+  if (forcePortal ? connected : wm.getWiFiIsSaved()) {
+    deviceId  = String(pDeviceId.getValue());
+    bin1Id    = String(pBin1Id.getValue());
+    bin2Id    = String(pBin2Id.getValue());
+    serverUrl = String(pUrl.getValue());
+    SENSOR1_EMPTY_DISTANCE_MM = atof(pEmpty1.getValue());
+    SENSOR1_FULL_DISTANCE_MM  = atof(pFull1.getValue());
+    SENSOR2_EMPTY_DISTANCE_MM = atof(pEmpty2.getValue());
+    SENSOR2_FULL_DISTANCE_MM  = atof(pFull2.getValue());
+    for (int i = 0; i < MAX_WIFI_NETWORKS; i++) {
+      wifiNetworks[i].ssid     = String(ssidParams[i]->getValue());
+      wifiNetworks[i].password = String(passParams[i]->getValue());
+    }
+    if (connected) rememberWifiNetwork(WiFi.SSID(), wm.getWiFiPass());
+    saveSettings();
+  }
+
+  for (int i = 0; i < MAX_WIFI_NETWORKS; i++) {
+    delete ssidParams[i];
+    delete passParams[i];
+  }
+
+  if (forcePortal) {
+    Serial.println("Portal closed; restarting...");
+    delay(1000);
+    ESP.restart();
   }
 
   if (!connected) {
@@ -275,56 +396,6 @@ void setupWiFi() {
   Serial.print("WiFi connected. IP: ");
   Serial.println(WiFi.localIP());
   if (STATUS_LED_PIN >= 0) digitalWrite(STATUS_LED_PIN, HIGH);
-}
-
-// On-demand portal (triggered by holding the config button)
-void openConfigPortal() {
-  WiFiManager wm;
-
-  WiFiManagerParameter pBin1Id("bin1_id", "Bin 1 ID", bin1Id.c_str(), 40);
-  WiFiManagerParameter pBin2Id("bin2_id", "Bin 2 ID", bin2Id.c_str(), 40);
-  WiFiManagerParameter pUrl("server_url", "Server URL (https://...)", serverUrl.c_str(), 200);
-  char empty1Buf[16]; dtostrf(SENSOR1_EMPTY_DISTANCE_MM, 0, 1, empty1Buf);
-  char full1Buf[16];  dtostrf(SENSOR1_FULL_DISTANCE_MM,  0, 1, full1Buf);
-  char empty2Buf[16]; dtostrf(SENSOR2_EMPTY_DISTANCE_MM, 0, 1, empty2Buf);
-  char full2Buf[16];  dtostrf(SENSOR2_FULL_DISTANCE_MM,  0, 1, full2Buf);
-  WiFiManagerParameter pEmpty1("s1_empty_mm", "Bin 1 empty distance (mm)", empty1Buf, 8);
-  WiFiManagerParameter pFull1("s1_full_mm",  "Bin 1 full distance (mm)",  full1Buf, 8);
-  WiFiManagerParameter pEmpty2("s2_empty_mm", "Bin 2 empty distance (mm)", empty2Buf, 8);
-  WiFiManagerParameter pFull2("s2_full_mm",  "Bin 2 full distance (mm)",  full2Buf, 8);
-
-  wm.addParameter(&pBin1Id);
-  wm.addParameter(&pBin2Id);
-  wm.addParameter(&pUrl);
-  wm.addParameter(&pEmpty1);
-  wm.addParameter(&pFull1);
-  wm.addParameter(&pEmpty2);
-  wm.addParameter(&pFull2);
-
-  wm.setConfigPortalTimeout(180);
-  if (wm.startConfigPortal("SmartBin-Setup", "binsetup123")) {
-    applyPortalParams(pBin1Id, pBin2Id, pUrl, pEmpty1, pFull1, pEmpty2, pFull2);
-  }
-  Serial.println("Portal closed; restarting...");
-  delay(1000);
-  ESP.restart();
-}
-
-void applyPortalParams(WiFiManagerParameter& pBin1Id,
-                       WiFiManagerParameter& pBin2Id,
-                       WiFiManagerParameter& pUrl,
-                       WiFiManagerParameter& pEmpty1,
-                       WiFiManagerParameter& pFull1,
-                       WiFiManagerParameter& pEmpty2,
-                       WiFiManagerParameter& pFull2) {
-  bin1Id    = String(pBin1Id.getValue());
-  bin2Id    = String(pBin2Id.getValue());
-  serverUrl = String(pUrl.getValue());
-  SENSOR1_EMPTY_DISTANCE_MM = atof(pEmpty1.getValue());
-  SENSOR1_FULL_DISTANCE_MM  = atof(pFull1.getValue());
-  SENSOR2_EMPTY_DISTANCE_MM = atof(pEmpty2.getValue());
-  SENSOR2_FULL_DISTANCE_MM  = atof(pFull2.getValue());
-  saveSettings();
 }
 
 // ==================================================================
@@ -345,16 +416,14 @@ void waitForTime() {
   }
 }
 
-// getLocalTime() already returns WAT (UTC+1) since configTime() was set up
-// with a 3600s offset, so the ISO-8601 suffix must be "+01:00", not "Z"
-// ("Z" specifically means zero/UTC offset).
-String getIso8601Timestamp() {
+// recordedAt is reported in UTC (suffix "Z"), regardless of the WAT
+// offset configTime() was set up with for local-time use elsewhere.
+String getIso8601UtcTimestamp() {
+  time_t now = time(nullptr);
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
-    return "1970-01-01T00:00:00+01:00";
-  }
+  gmtime_r(&now, &timeinfo);
   char buf[30];
-  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S+01:00", &timeinfo);
+  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S.000Z", &timeinfo);
   return String(buf);
 }
 
@@ -417,31 +486,33 @@ void takeReadingAndReport() {
   Serial.printf("%s: %.1f mm (%.1f%%)   %s: %.1f mm (%.1f%%)\n",
                 bin1Id.c_str(), d1, f1, bin2Id.c_str(), d2, f2);
 
-  String payload = buildJson(d1, f1, d2, f2);
+  String recordedAt = getIso8601UtcTimestamp();
 
-  Serial.println("JSON payload:");
-  Serial.println(payload);
+  // Each bin is reported independently, as its own POST request -- there
+  // is no combined/averaged fill_pct, since bin 1 and bin 2 are physically
+  // separate bins. A bin whose sensor failed to read this cycle is skipped
+  // rather than sending a bogus fillPercentage.
+  if (f1 >= 0) {
+    String payload1 = buildBinJson(bin1Id, f1, recordedAt);
+    Serial.println("JSON payload (bin 1):");
+    Serial.println(payload1);
+    sendReport(payload1);
+  }
 
-  sendReport(payload);
+  if (f2 >= 0) {
+    String payload2 = buildBinJson(bin2Id, f2, recordedAt);
+    Serial.println("JSON payload (bin 2):");
+    Serial.println(payload2);
+    sendReport(payload2);
+  }
 }
 
-// Each bin is reported independently -- there is no combined/averaged
-// fill_pct, since bin 1 and bin 2 are physically separate bins.
-String buildJson(float d1, float f1, float d2, float f2) {
-  StaticJsonDocument<384> doc;
-  doc["timestamp"] = getIso8601Timestamp();
-
-  JsonArray bins = doc.createNestedArray("bins");
-
-  JsonObject b1 = bins.createNestedObject();
-  b1["bin_id"] = bin1Id;
-  if (d1 >= 0) { b1["distance_mm"] = roundf(d1 * 10) / 10.0; b1["fill_pct"] = roundf(f1 * 10) / 10.0; }
-  else         { b1["distance_mm"] = nullptr;                b1["fill_pct"] = nullptr; }
-
-  JsonObject b2 = bins.createNestedObject();
-  b2["bin_id"] = bin2Id;
-  if (d2 >= 0) { b2["distance_mm"] = roundf(d2 * 10) / 10.0; b2["fill_pct"] = roundf(f2 * 10) / 10.0; }
-  else         { b2["distance_mm"] = nullptr;                b2["fill_pct"] = nullptr; }
+String buildBinJson(const String& binId, float fillPct, const String& recordedAt) {
+  StaticJsonDocument<256> doc;
+  doc["deviceId"] = deviceId;
+  doc["binId"] = binId;
+  doc["fillPercentage"] = (int)roundf(fillPct);
+  doc["recordedAt"] = recordedAt;
 
   String out;
   serializeJson(doc, out);
