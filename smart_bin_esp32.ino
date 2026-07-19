@@ -60,13 +60,11 @@
 // NOTE: all configured networks (hardcoded here, or added later via the
 // portal) are saved to NVS flash, a partition normal firmware uploads
 // do NOT erase, so they survive re-flashing.
-const int MAX_WIFI_NETWORKS = 4;
+const int MAX_WIFI_NETWORKS = 2;
 struct WifiCredential { String ssid; String password; };
 WifiCredential wifiNetworks[MAX_WIFI_NETWORKS] = {
-  { "", "" },
-  { "", "" },
-  { "", "" },
-  { "", "" },
+  { "Timi's Iphone.", "P@s$oro689" },
+  { "hotspot", "password" },
 };
 
 // ---- Pin wiring -----------------------------------------------------
