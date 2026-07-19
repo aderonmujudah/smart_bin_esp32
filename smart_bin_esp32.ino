@@ -92,7 +92,7 @@ float SENSOR2_FULL_DISTANCE_MM  = 20.0;   // bin 2: measured full reading
 // re-flashing. Each bin gets its own ID since they're reported separately.
 String bin1Id    = "BIN-001";
 String bin2Id    = "BIN-002";
-String serverUrl = "";   // e.g. https://example.com/api/bins/report
+String serverUrl = "https://honorable-oyster-125.eu-west-1.convex.site/hardware/readings";   // e.g. https://example.com/api/bins/report
 
 // ==================================================================
 // ==================  ADVANCED SETTINGS  ==========================
