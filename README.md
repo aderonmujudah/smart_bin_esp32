@@ -119,10 +119,20 @@ fill level.
 
 ---
 
-## First-boot configuration (captive portal)
+## Configuration
 
-On first boot (or whenever no WiFi is saved) the ESP32 starts its own WiFi
-access point:
+All the settings you're likely to need to change — WiFi, pin wiring, and
+per-bin calibration distances — are collected in one **"EDIT THIS SECTION"**
+block near the top of `smart_bin_esp32.ino`, right after the `#include`s.
+
+### Option A: hardcode your WiFi in the code
+Set `WIFI_SSID` / `WIFI_PASSWORD` in that block to your network's credentials
+and re-upload. The bin will connect straight to that network on every boot —
+no portal needed. Leave both as `""` to use the captive portal instead (below).
+
+### Option B: captive portal (no re-flashing needed)
+On first boot (or whenever no WiFi is saved/reachable, and `WIFI_SSID` is left
+blank) the ESP32 starts its own WiFi access point:
 
 1. On your phone/laptop, connect to the WiFi network **`SmartBin-Setup`**
    (password **`binsetup123`**).
@@ -139,7 +149,9 @@ access point:
 4. **Save.** The ESP32 stores everything and reboots onto your network.
 
 ### Where settings are stored (survives re-flashing)
-- **WiFi credentials** are saved by WiFiManager in the ESP32's **NVS flash**.
+- **WiFi credentials** — whether typed into the portal or hardcoded via
+  `WIFI_SSID`/`WIFI_PASSWORD` — are saved by the ESP32's WiFi driver in **NVS
+  flash**.
 - **Bin ID, Server URL, and calibration** are saved with the `Preferences`
   library, also in **NVS**.
 

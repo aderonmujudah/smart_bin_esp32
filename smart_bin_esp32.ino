@@ -44,9 +44,24 @@
 #include <Preferences.h>
 #include <time.h>
 
-// ------------------------------------------------------------------
-// PIN CONFIGURATION  (change to match your wiring)
-// ------------------------------------------------------------------
+// ==================================================================
+// ====================  EDIT THIS SECTION  ========================
+// ==================================================================
+// Everything you're likely to need to change lives here: WiFi,
+// pin wiring, and per-bin calibration distances.
+
+// ---- WiFi ---------------------------------------------------------
+// Fill these in with your home/office network to auto-connect on
+// every boot with no captive portal needed. Leave both as "" to skip
+// straight to the "SmartBin-Setup" portal instead (see README).
+// NOTE: whichever network gets used (hardcoded here, or entered later
+// in the portal) is saved by the ESP32's WiFi driver into NVS flash,
+// a partition normal firmware uploads do NOT erase, so it survives
+// re-flashing.
+const char* WIFI_SSID     = "";
+const char* WIFI_PASSWORD = "";
+
+// ---- Pin wiring -----------------------------------------------------
 // Each HC-SR04 needs a TRIG (output) and ECHO (input) pin.
 // NOTE: HC-SR04 ECHO puts out 5 V. Use a voltage divider
 // (1k / 2k) or a level shifter on each ECHO line to protect the
@@ -63,9 +78,7 @@ const int CONFIG_BUTTON_PIN = 0;   // GPIO0 = the onboard BOOT button
 // On-board LED for status feedback (2 on most dev boards, -1 to disable)
 const int STATUS_LED_PIN = 2;
 
-// ------------------------------------------------------------------
-// BIN GEOMETRY  (calibrate independently per bin/sensor)
-// ------------------------------------------------------------------
+// ---- Bin geometry (calibrate independently per bin/sensor) ---------
 // Distance the sensor reads when its bin is EMPTY  (sensor -> bottom).
 // Distance the sensor reads when its bin is FULL   (sensor -> top of trash).
 // fill% = (EMPTY - measured) / (EMPTY - FULL) * 100, clamped to 0..100.
@@ -76,9 +89,16 @@ float SENSOR1_FULL_DISTANCE_CM  = 5.0;    // bin 1: "full" when trash is 5 cm be
 float SENSOR2_EMPTY_DISTANCE_CM = 40.0;   // bin 2: calibrate for its own geometry
 float SENSOR2_FULL_DISTANCE_CM  = 5.0;    // bin 2: calibrate for its own geometry
 
-// ------------------------------------------------------------------
-// TIMING
-// ------------------------------------------------------------------
+// ---- Device identity / server ---------------------------------------
+// Defaults; can also be changed later from the config portal without
+// re-flashing.
+String binId     = "BIN-001";
+String serverUrl = "";   // e.g. https://example.com/api/bins/report
+
+// ==================================================================
+// ==================  ADVANCED SETTINGS  ==========================
+// ==================================================================
+// Rarely need to change these.
 const unsigned long REPORT_INTERVAL_MS = 60UL * 1000UL;   // send every 60 s
 const unsigned long SENSOR_TIMEOUT_US  = 30000UL;         // ~5 m max echo wait
 const int           SAMPLES_PER_READ   = 5;               // median-ish averaging
@@ -91,10 +111,6 @@ const char* NTP_SERVER2 = "time.nist.gov";
 // GLOBALS
 // ------------------------------------------------------------------
 Preferences prefs;
-
-// User-configurable settings (defaults; overwritten from NVS / portal)
-String binId    = "BIN-001";
-String serverUrl = "";   // e.g. https://example.com/api/bins/report
 
 unsigned long lastReportMs = 0;
 
@@ -185,6 +201,27 @@ void saveSettings() {
 // WIFI + CAPTIVE PORTAL
 // ==================================================================
 void setupWiFi() {
+  // If a WiFi network is hardcoded above, try it first so the bin can
+  // boot straight onto your network with no portal interaction at all.
+  if (strlen(WIFI_SSID) > 0) {
+    Serial.printf("Connecting to hardcoded WiFi \"%s\"", WIFI_SSID);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000UL) {
+      delay(250);
+      Serial.print(".");
+    }
+    Serial.println();
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("WiFi connected. IP: ");
+    Serial.println(WiFi.localIP());
+    if (STATUS_LED_PIN >= 0) digitalWrite(STATUS_LED_PIN, HIGH);
+    return;
+  }
+
   WiFiManager wm;
 
   // Custom fields shown in the captive portal, pre-filled with saved values
