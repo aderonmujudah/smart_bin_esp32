@@ -51,10 +51,10 @@
 // NOTE: HC-SR04 ECHO puts out 5 V. Use a voltage divider
 // (1k / 2k) or a level shifter on each ECHO line to protect the
 // ESP32's 3.3 V GPIOs.
-const int SENSOR1_TRIG_PIN = 5;
-const int SENSOR1_ECHO_PIN = 18;
-const int SENSOR2_TRIG_PIN = 17;
-const int SENSOR2_ECHO_PIN = 16;
+const int SENSOR1_TRIG_PIN = 17;
+const int SENSOR1_ECHO_PIN = 5;
+const int SENSOR2_TRIG_PIN = 26;
+const int SENSOR2_ECHO_PIN = 25;
 
 // Pin held LOW during boot forces the config portal to re-open
 // (wire a button from this pin to GND). Set to -1 to disable.
@@ -260,12 +260,16 @@ void openConfigPortal() {
 
 void applyPortalParams(WiFiManagerParameter& pBinId,
                        WiFiManagerParameter& pUrl,
-                       WiFiManagerParameter& pEmpty,
-                       WiFiManagerParameter& pFull) {
+                       WiFiManagerParameter& pEmpty1,
+                       WiFiManagerParameter& pFull1,
+                       WiFiManagerParameter& pEmpty2,
+                       WiFiManagerParameter& pFull2) {
   binId     = String(pBinId.getValue());
   serverUrl = String(pUrl.getValue());
-  BIN_EMPTY_DISTANCE_CM = atof(pEmpty.getValue());
-  BIN_FULL_DISTANCE_CM  = atof(pFull.getValue());
+  SENSOR1_EMPTY_DISTANCE_CM = atof(pEmpty1.getValue());
+  SENSOR1_FULL_DISTANCE_CM  = atof(pFull1.getValue());
+  SENSOR2_EMPTY_DISTANCE_CM = atof(pEmpty2.getValue());
+  SENSOR2_FULL_DISTANCE_CM  = atof(pFull2.getValue());
   saveSettings();
 }
 
@@ -326,12 +330,13 @@ float readUltrasonic(int trigPin, int echoPin) {
   return sum / valid;
 }
 
-// Convert a measured distance to a 0..100 fill percentage.
-float distanceToFillPct(float distanceCm) {
+// Convert a measured distance to a 0..100 fill percentage, using the
+// empty/full calibration for that specific bin/sensor.
+float distanceToFillPct(float distanceCm, float emptyCm, float fullCm) {
   if (distanceCm < 0) return -1.0;   // invalid
-  float span = BIN_EMPTY_DISTANCE_CM - BIN_FULL_DISTANCE_CM;
+  float span = emptyCm - fullCm;
   if (span <= 0) return -1.0;        // misconfigured geometry
-  float pct = (BIN_EMPTY_DISTANCE_CM - distanceCm) / span * 100.0f;
+  float pct = (emptyCm - distanceCm) / span * 100.0f;
   if (pct < 0)   pct = 0;
   if (pct > 100) pct = 100;
   return pct;
@@ -344,8 +349,8 @@ void takeReadingAndReport() {
   float d1 = readUltrasonic(SENSOR1_TRIG_PIN, SENSOR1_ECHO_PIN);
   float d2 = readUltrasonic(SENSOR2_TRIG_PIN, SENSOR2_ECHO_PIN);
 
-  float f1 = distanceToFillPct(d1);
-  float f2 = distanceToFillPct(d2);
+  float f1 = distanceToFillPct(d1, SENSOR1_EMPTY_DISTANCE_CM, SENSOR1_FULL_DISTANCE_CM);
+  float f2 = distanceToFillPct(d2, SENSOR2_EMPTY_DISTANCE_CM, SENSOR2_FULL_DISTANCE_CM);
 
   // Average only the sensors that returned a valid reading
   float fillSum = 0; int fillCount = 0;
@@ -362,6 +367,10 @@ void takeReadingAndReport() {
                 d1, f1, d2, f2, fillAvg);
 
   String payload = buildJson(fillAvg, d1, f1, d2, f2);
+
+  Serial.println("JSON payload:");
+  Serial.println(payload);
+
   sendReport(payload);
 }
 
@@ -388,8 +397,7 @@ String buildJson(float fillAvg, float d1, float f1, float d2, float f2) {
 
 void sendReport(const String& payload) {
   if (serverUrl.length() == 0) {
-    Serial.println("No server URL set. Payload would be:");
-    Serial.println(payload);
+    Serial.println("No server URL set; skipping HTTP POST.");
     return;
   }
   if (WiFi.status() != WL_CONNECTED) {
