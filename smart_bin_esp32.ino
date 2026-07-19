@@ -24,7 +24,7 @@
  * NVS (Non-Volatile Storage), a dedicated flash partition that is NOT
  * touched by a normal "Upload" of new firmware (only "Erase Flash" or
  * changing the partition table wipes it), so WiFi survives re-flashing.
- * Device settings (bin ID, server URL, calibration distances) are
+ * Device settings (bin IDs, server URL, calibration distances) are
  * likewise saved to NVS via the Preferences library (see loadSettings()
  * / saveSettings() below).
  *
@@ -409,21 +409,15 @@ void takeReadingAndReport() {
   float f1 = distanceToFillPct(d1, SENSOR1_EMPTY_DISTANCE_MM, SENSOR1_FULL_DISTANCE_MM);
   float f2 = distanceToFillPct(d2, SENSOR2_EMPTY_DISTANCE_MM, SENSOR2_FULL_DISTANCE_MM);
 
-  // Average only the sensors that returned a valid reading
-  float fillSum = 0; int fillCount = 0;
-  if (f1 >= 0) { fillSum += f1; fillCount++; }
-  if (f2 >= 0) { fillSum += f2; fillCount++; }
-
-  if (fillCount == 0) {
-    Serial.println("Both sensors failed to read; skipping this cycle.");
+  if (f1 < 0 && f2 < 0) {
+    Serial.println("Both bins failed to read; skipping this cycle.");
     return;
   }
-  float fillAvg = fillSum / fillCount;
 
-  Serial.printf("S1: %.1f mm (%.1f%%)  S2: %.1f mm (%.1f%%)  ->  avg %.1f%%\n",
-                d1, f1, d2, f2, fillAvg);
+  Serial.printf("%s: %.1f mm (%.1f%%)   %s: %.1f mm (%.1f%%)\n",
+                bin1Id.c_str(), d1, f1, bin2Id.c_str(), d2, f2);
 
-  String payload = buildJson(fillAvg, d1, f1, d2, f2);
+  String payload = buildJson(d1, f1, d2, f2);
 
   Serial.println("JSON payload:");
   Serial.println(payload);
@@ -431,21 +425,23 @@ void takeReadingAndReport() {
   sendReport(payload);
 }
 
-String buildJson(float fillAvg, float d1, float f1, float d2, float f2) {
+// Each bin is reported independently -- there is no combined/averaged
+// fill_pct, since bin 1 and bin 2 are physically separate bins.
+String buildJson(float d1, float f1, float d2, float f2) {
   StaticJsonDocument<384> doc;
-  doc["bin_id"]    = binId;
   doc["timestamp"] = getIso8601Timestamp();
-  doc["fill_pct"]  = roundf(fillAvg * 10) / 10.0;   // 1 decimal place
 
-  JsonArray sensors = doc.createNestedArray("sensors");
-  JsonObject s1 = sensors.createNestedObject();
-  s1["id"] = 1;
-  if (d1 >= 0) { s1["distance_mm"] = roundf(d1 * 10) / 10.0; s1["fill_pct"] = roundf(f1 * 10) / 10.0; }
-  else         { s1["distance_mm"] = nullptr;                s1["fill_pct"] = nullptr; }
-  JsonObject s2 = sensors.createNestedObject();
-  s2["id"] = 2;
-  if (d2 >= 0) { s2["distance_mm"] = roundf(d2 * 10) / 10.0; s2["fill_pct"] = roundf(f2 * 10) / 10.0; }
-  else         { s2["distance_mm"] = nullptr;                s2["fill_pct"] = nullptr; }
+  JsonArray bins = doc.createNestedArray("bins");
+
+  JsonObject b1 = bins.createNestedObject();
+  b1["bin_id"] = bin1Id;
+  if (d1 >= 0) { b1["distance_mm"] = roundf(d1 * 10) / 10.0; b1["fill_pct"] = roundf(f1 * 10) / 10.0; }
+  else         { b1["distance_mm"] = nullptr;                b1["fill_pct"] = nullptr; }
+
+  JsonObject b2 = bins.createNestedObject();
+  b2["bin_id"] = bin2Id;
+  if (d2 >= 0) { b2["distance_mm"] = roundf(d2 * 10) / 10.0; b2["fill_pct"] = roundf(f2 * 10) / 10.0; }
+  else         { b2["distance_mm"] = nullptr;                b2["fill_pct"] = nullptr; }
 
   String out;
   serializeJson(doc, out);

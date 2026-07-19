@@ -1,38 +1,36 @@
  # Smart Bin (ESP32)
 
-A prototype smart waste bin. An ESP32 reads two ultrasonic sensors, works out how
-full the bin is, and posts a JSON message to a web endpoint over HTTPS at a fixed
-interval.
+A prototype smart waste bin. An ESP32 reads two ultrasonic sensors — one per
+physical bin — works out how full each bin is, and posts a JSON message to a
+web endpoint over HTTPS at a fixed interval.
 
 ---
 
 ## What it sends
 
-Every reporting cycle (default: 60 s) the ESP32 POSTs a JSON body like this:
+Every reporting cycle (default: 5 s) the ESP32 POSTs a JSON body like this.
+**Each bin is reported independently — there is no combined/averaged
+`fill_pct`,** since bin 1 and bin 2 are physically separate bins:
 
 ```json
 {
-  "bin_id": "BIN-001",
-  "timestamp": "2026-07-15T14:03:22Z",
-  "fill_pct": 72.5,
-  "sensors": [
-    { "id": 1, "distance_mm": 112.0, "fill_pct": 71.0 },
-    { "id": 2, "distance_mm": 104.0, "fill_pct": 74.0 }
+  "timestamp": "2026-07-15T14:03:22+01:00",
+  "bins": [
+    { "bin_id": "BIN-001", "distance_mm": 112.0, "fill_pct": 71.0 },
+    { "bin_id": "BIN-002", "distance_mm": 104.0, "fill_pct": 74.0 }
   ]
 }
 ```
 
-| Field        | Meaning                                                             |
-|--------------|--------------------------------------------------------------------|
-| `bin_id`     | Unique bin identifier (set in the config portal).                  |
-| `timestamp`  | UTC time the message left the ESP32, ISO-8601 (`...Z`).            |
-| `fill_pct`   | **Required value** — average fill % across the working sensors.    |
-| `sensors[]`  | Per-sensor detail (raw distance + individual fill %). Optional.    |
+| Field               | Meaning                                                       |
+|---------------------|----------------------------------------------------------------|
+| `timestamp`         | WAT (UTC+1) time the message left the ESP32, ISO-8601 (`+01:00`).|
+| `bins[].bin_id`     | That bin's identifier (set in the config portal).             |
+| `bins[].distance_mm`| Raw measured distance in millimetres.                         |
+| `bins[].fill_pct`   | That bin's fill percentage, 0–100.                             |
 
-> The three fields you asked for are `bin_id`, `timestamp`, and `fill_pct`.
-> The `sensors` array is extra detail you can ignore server-side if you don't need it.
-> A sensor that failed to read reports `distance_mm: null` / `fill_pct: null` and is
-> left out of the average.
+> A bin whose sensor failed to read reports `distance_mm: null` / `fill_pct: null`
+> for that entry only — the other bin is still sent normally.
 
 The same JSON is also always printed to the **Serial Monitor at 115200 baud**
 every reporting cycle, whether or not the HTTP POST succeeds (or even if no
@@ -90,9 +88,9 @@ ECHO ──[ 1kΩ ]──┬──> ESP32 GPIO
 
 Change the pin numbers at the top of `smart_bin_esp32.ino` if your wiring differs.
 
-Sensor placement: mount both sensors in the lid pointing straight down, ideally
-over different areas of the bin, so uneven piles of trash average out to a sensible
-fill level.
+Sensor placement: mount each sensor in the lid of its own bin, pointing straight
+down at the middle of the bin, since sensor 1 and sensor 2 monitor two separate
+bins rather than the same one.
 
 ---
 
@@ -139,7 +137,8 @@ blank) the ESP32 starts its own WiFi access point:
 2. A configuration page opens automatically (if not, browse to `http://192.168.4.1`).
 3. Tap **Configure WiFi** and you'll see:
    - Your home/office WiFi network + password
-   - **Bin ID** — e.g. `BIN-001`
+   - **Bin 1 ID** — e.g. `BIN-001`
+   - **Bin 2 ID** — e.g. `BIN-002`
    - **Server URL** — the endpoint to POST to, e.g.
      `https://your-server.com/api/bins/report`
    - **Bin 1 empty distance (mm)** / **Bin 1 full distance (mm)** — calibration
@@ -152,8 +151,8 @@ blank) the ESP32 starts its own WiFi access point:
 - **WiFi credentials** — whether typed into the portal or hardcoded via
   `WIFI_SSID`/`WIFI_PASSWORD` — are saved by the ESP32's WiFi driver in **NVS
   flash**.
-- **Bin ID, Server URL, and calibration** are saved with the `Preferences`
-  library, also in **NVS**.
+- **Bin 1 ID, Bin 2 ID, Server URL, and calibration** are saved with the
+  `Preferences` library, also in **NVS**.
 
 NVS lives in a separate flash partition from your program, so **uploading new
 firmware does NOT erase your saved settings.** They are only wiped by a full chip
@@ -206,8 +205,9 @@ app = Flask(__name__)
 @app.route("/api/bins/report", methods=["POST"])
 def report():
     data = request.get_json()
-    print(data["bin_id"], data["timestamp"], data["fill_pct"])
-    # ...store in a database, trigger an alert if fill_pct > 90, etc.
+    for bin in data["bins"]:
+        print(bin["bin_id"], data["timestamp"], bin["fill_pct"])
+        # ...store in a database, trigger an alert if fill_pct > 90, etc.
     return {"status": "ok"}, 200
 ```
 
@@ -232,10 +232,10 @@ Constants near the top of `smart_bin_esp32.ino`:
 | `REPORT_INTERVAL_MS`         | 5 000     | How often to send a report (ms).         |
 | `SAMPLES_PER_READ`           | 5         | Samples averaged per sensor reading.     |
 | `SENSOR_TIMEOUT_US`          | 30 000    | Max echo wait before a reading is "fail".|
-| `SENSOR1_EMPTY_DISTANCE_MM`  | 400.0     | Bin 1 distance when empty (also in portal).|
-| `SENSOR1_FULL_DISTANCE_MM`   | 50.0      | Bin 1 distance when full (also in portal). |
-| `SENSOR2_EMPTY_DISTANCE_MM`  | 400.0     | Bin 2 distance when empty (also in portal).|
-| `SENSOR2_FULL_DISTANCE_MM`   | 50.0      | Bin 2 distance when full (also in portal). |
+| `SENSOR1_EMPTY_DISTANCE_MM`  | 154.0     | Bin 1 distance when empty (also in portal).|
+| `SENSOR1_FULL_DISTANCE_MM`   | 20.0      | Bin 1 distance when full (also in portal). |
+| `SENSOR2_EMPTY_DISTANCE_MM`  | 108.0     | Bin 2 distance when empty (also in portal).|
+| `SENSOR2_FULL_DISTANCE_MM`   | 20.0      | Bin 2 distance when full (also in portal). |
 
 ---
 
